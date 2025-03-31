@@ -1,0 +1,26 @@
+[project]
+name = "zora-poc"
+version = "0.1.0"
+description = "Add your description here"
+authors = [
+    { name = "Arham Jain", email = "86415475+arhamj@users.noreply.github.com" }
+]
+dependencies = [
+    "web3>=7.10.0",
+]
+readme = "README.md"
+requires-python = ">= 3.12"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.rye]
+managed = true
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/zora_poc"]

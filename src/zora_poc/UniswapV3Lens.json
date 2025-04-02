@@ -1,0 +1,84 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "contract IPool",
+        "name": "pool",
+        "type": "address"
+      }
+    ],
+    "name": "getAllTicks",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "int24",
+            "name": "index",
+            "type": "int24"
+          },
+          {
+            "internalType": "uint128",
+            "name": "liquidityGross",
+            "type": "uint128"
+          },
+          {
+            "internalType": "int128",
+            "name": "liquidityNet",
+            "type": "int128"
+          }
+        ],
+        "internalType": "struct Tick[]",
+        "name": "ticks",
+        "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "contract IPool",
+        "name": "pool",
+        "type": "address"
+      },
+      {
+        "internalType": "int24",
+        "name": "tickStart",
+        "type": "int24"
+      },
+      {
+        "internalType": "uint256",
+        "name": "numTicks",
+        "type": "uint256"
+      }
+    ],
+    "name": "getTicks",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "int24",
+            "name": "index",
+            "type": "int24"
+          },
+          {
+            "internalType": "uint128",
+            "name": "liquidityGross",
+            "type": "uint128"
+          },
+          {
+            "internalType": "int128",
+            "name": "liquidityNet",
+            "type": "int128"
+          }
+        ],
+        "internalType": "struct Tick[]",
+        "name": "ticks",
+        "type": "tuple[]"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]

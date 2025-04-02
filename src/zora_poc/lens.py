@@ -204,7 +204,7 @@ def swap_quote_token0_to_token1(
     max_tick = max(ticks_net_liquidity_mapping.keys())
 
     current_range_bottom_tick = math.floor(current_tick / tick_spacing) * tick_spacing
-    amount_in_remaining = amount_in
+    amount_in_remaining = amount_in * (1 - 0.0001)  # 0.01% fee
     total_token1_out = 0
 
     current_sqrt_price = tick_to_price(current_tick / 2)
@@ -269,7 +269,7 @@ def swap_quote_token1_to_token0(
     min_tick = min(ticks_net_liquidity_mapping.keys())
 
     current_range_bottom_tick = math.floor(current_tick / tick_spacing) * tick_spacing
-    amount_in_remaining = amount_in
+    amount_in_remaining = amount_in * (1 - 0.0001)  # 0.01% fee
     total_token0_out = 0
 
     current_sqrt_price = tick_to_price(current_tick / 2)
@@ -331,6 +331,11 @@ if __name__ == "__main__":
     end_time = time.time()
     print(f"Execution time: {end_time - start_time} seconds")
 
+    token0 = pool_contract.functions.token0().call()
+    token1 = pool_contract.functions.token1().call()
+    print(f"Token0: {token0}, Token1: {token1}")
+    print("Decimals0: 18, Decimals1: 18")
+
     # Fetch pool state
     start_time = time.time()
     pool_state = fetch_pool_state()
@@ -339,7 +344,7 @@ if __name__ == "__main__":
     print(f"Execution time: {end_time - start_time} seconds")
 
     print("Starting swap quote calculation (token0 to token1)...")
-    amount = 1 * 10 ** (18 - 1)  # just to explain the logic
+    amount = 100 * 10 ** (18)  # just to explain the logic
     zero_for_one = True
     start_time = time.time()
     amount_out = swap_quote_token0_to_token1(
@@ -347,7 +352,7 @@ if __name__ == "__main__":
     )
     end_time = time.time()
     print(f"Amount out: {amount_out}")
-    print(f"Execution time: {end_time - start_time} seconds")
+    print(f"Execution time: {(end_time - start_time)*10**3} milliseconds")
     print("Swap quote calculation completed.")
 
     print("Starting swap quote calculation (token1 to token0)...")
@@ -359,5 +364,5 @@ if __name__ == "__main__":
     )
     end_time = time.time()
     print(f"Amount out: {amount_out}")
-    print(f"Execution time: {end_time - start_time} seconds")
+    print(f"Execution time: {(end_time - start_time)*10**6} milliseconds")
     print("Swap quote calculation completed.")

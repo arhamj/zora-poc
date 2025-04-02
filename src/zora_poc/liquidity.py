@@ -6,7 +6,7 @@ import json
 
 # Configuration
 RPC_URL = "http://base-proxy.lat.nodes.internal.notnotzora.com"
-POOL_ADDRESS = Web3.to_checksum_address("0x280a628e91f29ae8dca3e9b32e4d540b38ccb13a")
+POOL_ADDRESS = Web3.to_checksum_address("0xE020E67Cb76C780329d4c205578Aaa6d6478Fb2A")
 UNISWAP_V3_POOL_ABI_PATH = "src/zora_poc/UniswapV3Pool.json"
 
 # Web3 setup

@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import math
 import time
 from eth_typing import HexStr
@@ -5,6 +6,21 @@ from web3 import Web3
 import json
 
 from zora_poc.lens_state import PoolState, Tick
+from zora_poc.simulator.libraries import (
+    FullMath,
+    LiquidityMath,
+    SafeMath,
+    TickMath,
+    Tick as LibTick,
+)
+from zora_poc.simulator.libraries import SwapMath
+from zora_poc.simulator.libraries.Shared import (
+    MAX_SQRT_RATIO,
+    MIN_SQRT_RATIO,
+    FixedPoint128_Q128,
+    checkInputTypes,
+    toUint256,
+)
 
 
 # Configuration
@@ -63,26 +79,15 @@ def get_liquidity(ticks_net_liquidity_mapping: dict) -> None:
     slot0 = pool_contract.functions.slot0().call()
     current_tick = slot0[1]
 
-    current_liquidity = pool_contract.functions.liquidity().call()
-
-    print(f"Tick spacing: {tick_spacing}")
-    print(f"Token0: {token0}, Token1: {token1}")
-    print(f"Decimals0: {decimals0}, Decimals1: {decimals1}")
-    print(f"Current tick: {current_tick}")
-    print(f"Current liquidity: {current_liquidity}")
-
     # calculations
     liquidity = 0
 
     # boundaries
     min_tick = min(ticks_net_liquidity_mapping.keys())
     max_tick = max(ticks_net_liquidity_mapping.keys())
-    print(f"Min tick: {min_tick}, Max tick: {max_tick}")
 
     # find the tick range
     current_range_bottom_tick = math.floor(current_tick / tick_spacing) * tick_spacing
-    current_price = tick_to_price(current_tick)
-    adjusted_current_price = current_price / (10 ** (decimals1 - decimals0))
 
     total_amount0 = 0
     total_amount1 = 0
@@ -101,17 +106,7 @@ def get_liquidity(ticks_net_liquidity_mapping: dict) -> None:
         adjusted_price = price / (10 ** (decimals1 - decimals0))  # 1
         if invert_price:
             adjusted_price = 1 / adjusted_price
-            tokens = "{} for {}".format(token0, token1)
-        else:
-            tokens = "{} for {}".format(token1, token0)
 
-        should_print_tick = liquidity != 0
-        if should_print_tick:
-            print(
-                "ticks=[{}, {}], bottom tick price={:.6f} {}".format(
-                    tick, tick + tick_spacing, adjusted_price, tokens
-                )
-            )
         # Compute square roots of prices corresponding to the bottom and top ticks
         bottom_tick = tick
         top_tick = bottom_tick + tick_spacing
@@ -126,46 +121,16 @@ def get_liquidity(ticks_net_liquidity_mapping: dict) -> None:
             # Only token1 locked
             total_amount1 += amount1
 
-            if should_print_tick:
-                adjusted_amount0 = amount0 / (10**decimals0)
-                adjusted_amount1 = amount1 / (10**decimals1)
-                print(
-                    "        {:.2f} {} locked, potentially worth {:.2f} {}".format(
-                        adjusted_amount1, token1, adjusted_amount0, token0
-                    )
-                )
-
         elif tick == current_range_bottom_tick:
-            # Always print the current tick. It normally has both assets locked
-            print("        Current tick, both assets present!")
-            print(
-                "        Current price={:.6f} {}".format(
-                    (
-                        1 / adjusted_current_price
-                        if invert_price
-                        else adjusted_current_price
-                    ),
-                    tokens,
-                )
-            )
-
             # Print the real amounts of the two assets needed to be swapped to move out of the current tick range
             current_sqrt_price = tick_to_price(current_tick / 2)
             amount0actual = (
                 liquidity * (sb - current_sqrt_price) / (current_sqrt_price * sb)
             )
             amount1actual = liquidity * (current_sqrt_price - sa)
-            adjusted_amount0actual = amount0actual / (10**decimals0)
-            adjusted_amount1actual = amount1actual / (10**decimals1)
 
             total_amount0 += amount0actual
             total_amount1 += amount1actual
-
-            print(
-                "        {:.2f} {} and {:.2f} {} remaining in the current tick range".format(
-                    adjusted_amount0actual, token0, adjusted_amount1actual, token1
-                )
-            )
 
         else:
             # Compute the amounts of tokens potentially in the range
@@ -174,15 +139,6 @@ def get_liquidity(ticks_net_liquidity_mapping: dict) -> None:
 
             # Only token0 locked
             total_amount0 += amount0
-
-            if should_print_tick:
-                adjusted_amount0 = amount0 / (10**decimals0)
-                adjusted_amount1 = amount1 / (10**decimals1)
-                print(
-                    "        {:.2f} {} locked, potentially worth {:.2f} {}".format(
-                        adjusted_amount0, token0, adjusted_amount1, token1
-                    )
-                )
 
         tick += tick_spacing
 
@@ -259,6 +215,48 @@ def fetch_pool_state() -> PoolState:
         return PoolState(0, 0)
 
 
+def swap_quote_token0_to_token1_2(
+    amount_in: int, ticks_net_liquidity_mapping: dict, pool_state: PoolState
+) -> int:
+    tick_spacing = TICK_SPACING
+    current_tick = pool_state.current_tick
+    current_liquidity = pool_state.current_liquidity
+
+    max_tick = max(ticks_net_liquidity_mapping.keys())
+
+    current_range_bottom_tick = math.floor(current_tick / tick_spacing) * tick_spacing
+    amount_in_remaining = amount_in
+    total_token1_out = 0
+    tick = current_range_bottom_tick
+
+    while amount_in_remaining > 0 and tick <= max_tick:
+        liquidity_delta = ticks_net_liquidity_mapping.get(tick, 0)
+        current_liquidity += liquidity_delta
+
+        bottom_tick = tick
+        top_tick = bottom_tick + tick_spacing
+        sqrt_price_current = tick_to_price(bottom_tick / 2)
+        sqrt_price_next = tick_to_price(top_tick / 2)
+
+        # Compute how much token0 we need to move to the next tick
+        delta_y = current_liquidity * (sqrt_price_next - sqrt_price_current)
+        delta_x = delta_y / (sqrt_price_next * sqrt_price_current)
+
+        if amount_in_remaining >= delta_x:
+            # If we have enough token0 to swap fully in this range
+            total_token1_out += delta_y
+            amount_in_remaining -= delta_x
+        else:
+            # If not, calculate partial swap based on remaining token0
+            delta_y_partial = amount_in_remaining * sqrt_price_current * sqrt_price_next
+            total_token1_out += delta_y_partial
+            break  # Stop as we've used up all input
+
+        tick += tick_spacing
+
+    return int(total_token1_out)
+
+
 def swap_quote_token1_to_token0(
     amount_in: int, ticks_net_liquidity_mapping: dict, pool_state: PoolState
 ) -> int:
@@ -317,8 +315,266 @@ def swap_quote_token1_to_token0(
     return int(total_token0_out)
 
 
+def swap_quote_token1_to_token0_2(
+    amount_in: int, ticks_net_liquidity_mapping: dict, pool_state: PoolState
+) -> int:
+    tick_spacing = TICK_SPACING
+
+    current_tick = pool_state.current_tick
+    current_liquidity = pool_state.current_liquidity
+
+    min_tick = min(ticks_net_liquidity_mapping.keys())
+
+    current_range_bottom_tick = math.floor(current_tick / tick_spacing) * tick_spacing
+    amount_in_remaining = amount_in
+    total_token0_out = 0
+    tick = current_range_bottom_tick
+
+    while amount_in_remaining > 0 and tick >= min_tick:
+        liquidity_delta = ticks_net_liquidity_mapping.get(tick, 0)
+        current_liquidity += liquidity_delta
+
+        top_tick = tick
+        bottom_tick = top_tick - tick_spacing
+        sqrt_price_current = tick_to_price(top_tick / 2)
+        sqrt_price_next = tick_to_price(bottom_tick / 2)
+
+        # Compute how much token1 is required to move to the next tick
+        delta_x = current_liquidity * (1 / sqrt_price_next - 1 / sqrt_price_current)
+        delta_y = delta_x * sqrt_price_current * sqrt_price_next
+
+        if amount_in_remaining >= delta_y:
+            # If we have enough token1 to swap fully in this range
+            total_token0_out += delta_x
+            amount_in_remaining -= delta_y
+        else:
+            # If not, calculate partial swap based on remaining token1
+            delta_x_partial = amount_in_remaining / (
+                sqrt_price_current * sqrt_price_next
+            )
+            total_token0_out += delta_x_partial
+            break  # Stop as we've used up all input
+
+        tick -= tick_spacing
+
+    return int(total_token0_out)
+
+
 def tick_to_price(tick):
     return TICK_BASE**tick
+
+
+@dataclass
+class SwapCache:
+    ## liquidity at the beginning of the swap
+    liquidityStart: int
+
+
+## the top level state of the swap, the results of which are recorded in storage at the end
+@dataclass
+class SwapState:
+    ## the amount remaining to be swapped in#out of the input#output asset
+    amountSpecifiedRemaining: int
+    ## the amount already swapped out#in of the output#input asset
+    amountCalculated: int
+    ## current sqrt(price)
+    sqrtPriceX96: int
+    ## the tick associated with the current price
+    tick: int
+    ## the global fee growth of the input token
+    feeGrowthGlobalX128: int
+    ## the current liquidity in range
+    liquidity: int
+
+
+@dataclass
+class StepComputations:
+    ## the price at the beginning of the step
+    sqrtPriceStartX96: int
+    ## the next tick to swap to from the current tick in the swap direction
+    tickNext: int
+    ## whether tickNext is initialized or not
+    initialized: bool
+    ## sqrt(price) for the next tick (1#0)
+    sqrtPriceNextX96: int
+    ## how much is being swapped in in this step
+    amountIn: int
+    ## how much is being swapped out
+    amountOut: int
+    ## how much fee is being paid in
+    feeAmount: int
+
+
+@dataclass
+class Slot0:
+    ## the current price
+    sqrtPriceX96: int
+    ## the current tick
+    tick: int
+
+
+def nextTick(ticks, tick, lte):
+    checkInputTypes(int24=(tick), bool=(lte))
+
+    keyList = list(ticks)
+
+    # If tick doesn't exist in the mapping we fake it (easier than searching for nearest value). This is probably not the
+    # best way, but it is a simple and intuitive way to reproduce the behaviour of the logic.
+    if not ticks.__contains__(tick):
+        keyList += [tick]
+    sortedKeyList = sorted(keyList)
+    indexCurrentTick = sortedKeyList.index(tick)
+
+    if lte:
+        # If the current tick is initialized (not faked), we return the current tick
+        if ticks.__contains__(tick):
+            return tick, True
+        elif indexCurrentTick == 0:
+            # No tick to the left
+            return TickMath.MIN_TICK, False
+        else:
+            nextTick = sortedKeyList[indexCurrentTick - 1]
+    else:
+
+        if indexCurrentTick == len(sortedKeyList) - 1:
+            # No tick to the right
+            return TickMath.MAX_TICK, False
+        nextTick = sortedKeyList[indexCurrentTick + 1]
+
+    # Return tick within the boundaries
+    return nextTick, True
+
+
+def swap_quote(
+    ticks,
+    slot0,
+    liquidity,
+    zero_for_one,
+    amount_specified,
+    sqrt_price_limit_x96,
+):
+    assert amount_specified != 0, "AS"
+
+    if zero_for_one:
+        assert (
+            sqrt_price_limit_x96 < slot0.sqrtPriceX96
+            and sqrt_price_limit_x96 > TickMath.MIN_SQRT_RATIO
+        ), "SPL"
+    else:
+        assert (
+            sqrt_price_limit_x96 > slot0.sqrtPriceX96
+            and sqrt_price_limit_x96 < TickMath.MAX_SQRT_RATIO
+        ), "SPL"
+
+    cache = SwapCache(liquidity)
+
+    exactInput = amount_specified > 0
+
+    state = SwapState(
+        amountSpecifiedRemaining=amount_specified,
+        amountCalculated=0,
+        sqrtPriceX96=slot0.sqrtPriceX96,
+        tick=slot0.tick,
+        feeGrowthGlobalX128=0,
+        liquidity=cache.liquidityStart,
+    )
+
+    while (
+        state.amountSpecifiedRemaining != 0
+        and state.sqrtPriceX96 != sqrt_price_limit_x96
+    ):
+        step = StepComputations(0, 0, 0, 0, 0, 0, 0)
+        step.sqrtPriceStartX96 = state.sqrtPriceX96
+
+        (step.tickNext, step.initialized) = nextTick(ticks, state.tick, zero_for_one)
+
+        ## get the price for the next tick
+        step.sqrtPriceNextX96 = TickMath.getSqrtRatioAtTick(step.tickNext)
+
+        ## compute values to swap to the target tick, price limit, or point where input#output amount is exhausted
+        if zero_for_one:
+            sqrtRatioTargetX96 = (
+                sqrt_price_limit_x96
+                if step.sqrtPriceNextX96 < sqrt_price_limit_x96
+                else step.sqrtPriceNextX96
+            )
+        else:
+            sqrtRatioTargetX96 = (
+                sqrt_price_limit_x96
+                if step.sqrtPriceNextX96 > sqrt_price_limit_x96
+                else step.sqrtPriceNextX96
+            )
+
+        (
+            state.sqrtPriceX96,
+            step.amountIn,
+            step.amountOut,
+            step.feeAmount,
+        ) = SwapMath.computeSwapStep(
+            state.sqrtPriceX96,
+            sqrtRatioTargetX96,
+            state.liquidity,
+            state.amountSpecifiedRemaining,
+            10000,
+        )
+        if exactInput:
+            state.amountSpecifiedRemaining -= step.amountIn + step.feeAmount
+            state.amountCalculated = SafeMath.subInts(
+                state.amountCalculated, step.amountOut
+            )
+        else:
+            state.amountSpecifiedRemaining += step.amountOut
+            state.amountCalculated = SafeMath.addInts(
+                state.amountCalculated, step.amountIn + step.feeAmount
+            )
+
+        ## update global fee tracker
+        if state.liquidity > 0:
+            state.feeGrowthGlobalX128 += FullMath.mulDiv(
+                step.feeAmount, FixedPoint128_Q128, state.liquidity
+            )
+            # Addition can overflow in Solidity - mimic it
+            state.feeGrowthGlobalX128 = toUint256(state.feeGrowthGlobalX128)
+
+        ## shift tick if we reached the next price
+        if state.sqrtPriceX96 == step.sqrtPriceNextX96:
+            ## if the tick is initialized, run the tick transition
+            ## @dev: here is where we should handle the case of an uninitialized boundary tick
+            if step.initialized:
+                liquidityNet = LibTick.cross(
+                    ticks,
+                    step.tickNext,
+                    0,
+                    0,
+                )
+                ## if we're moving leftward, we interpret liquidityNet as the opposite sign
+                ## safe because liquidityNet cannot be type(int128).min
+                if zero_for_one:
+                    liquidityNet = -liquidityNet
+
+                state.liquidity = LiquidityMath.addDelta(state.liquidity, liquidityNet)
+
+            state.tick = (step.tickNext - 1) if zero_for_one else step.tickNext
+        elif state.sqrtPriceX96 != step.sqrtPriceStartX96:
+            ## recompute unless we're on a lower tick boundary (i.e. already transitioned ticks), and haven't moved
+            state.tick = TickMath.getTickAtSqrtRatio(state.sqrtPriceX96)
+
+    (amount0, amount1) = (
+        (amount_specified - state.amountSpecifiedRemaining, state.amountCalculated)
+        if (zero_for_one == exactInput)
+        else (
+            state.amountCalculated,
+            amount_specified - state.amountSpecifiedRemaining,
+        )
+    )
+
+    return (
+        amount0,
+        amount1,
+        state.sqrtPriceX96,
+        state.liquidity,
+        state.tick,
+    )
 
 
 if __name__ == "__main__":
@@ -327,42 +583,54 @@ if __name__ == "__main__":
     print(f"Fetched {len(ticks)} ticks")
     for tick in ticks:
         print(tick)
-    tick_liquidity_net_mapping = {tick.tick_index: tick.liquidity_net for tick in ticks}
+    tick_mapping = {tick.tick_index: tick for tick in ticks}
     end_time = time.time()
     print(f"Execution time: {end_time - start_time} seconds")
 
     token0 = pool_contract.functions.token0().call()
     token1 = pool_contract.functions.token1().call()
     print(f"Token0: {token0}, Token1: {token1}")
-    print("Decimals0: 18, Decimals1: 18")
+    decimals0 = 18
+    decimals1 = 18
+    print(f"Decimals0: {decimals0}, Decimals1: {decimals1}")
 
-    # Fetch pool state
     start_time = time.time()
-    pool_state = fetch_pool_state()
+    slot0_start_resp = pool_contract.functions.slot0().call()
+    slot0_start = Slot0(slot0_start_resp[0], slot0_start_resp[1])
+
+    liquidity = pool_contract.functions.liquidity().call()
     end_time = time.time()
-    print(f"Pool state fetched: {pool_state}")
     print(f"Execution time: {end_time - start_time} seconds")
+    print(f"Slot0: {slot0_start.sqrtPriceX96}, {slot0_start.tick}")
+    print(f"Liquidity: {liquidity}")
 
-    print("Starting swap quote calculation (token0 to token1)...")
-    amount = 100 * 10 ** (18)  # just to explain the logic
-    zero_for_one = True
     start_time = time.time()
-    amount_out = swap_quote_token0_to_token1(
-        amount, tick_liquidity_net_mapping, pool_state
+    (
+        amount0,
+        amount1,
+        sqrtPriceX96,
+        liquidity,
+        tick,
+    ) = swap_quote(
+        tick_mapping, slot0_start, liquidity, True, 5 * 10**17, MIN_SQRT_RATIO + 1
     )
-    end_time = time.time()
-    print(f"Amount out: {amount_out}")
-    print(f"Execution time: {(end_time - start_time)*10**3} milliseconds")
-    print("Swap quote calculation completed.")
+    print(f"Amount0: {amount0/10**decimals0}, Amount1: {amount1/10**decimals1}")
+    print(f"SqrtPriceX96: {sqrtPriceX96}, Liquidity: {liquidity}, Tick: {tick}")
 
-    print("Starting swap quote calculation (token1 to token0)...")
-    amount = 100000000 * 10**18
-    zero_for_one = True
-    start_time = time.time()
-    amount_out = swap_quote_token1_to_token0(
-        amount, tick_liquidity_net_mapping, pool_state
+    (
+        amount0,
+        amount1,
+        sqrtPriceX96,
+        liquidity,
+        tick,
+    ) = swap_quote(
+        tick_mapping,
+        slot0_start,
+        liquidity,
+        False,
+        100000000 * 10**18,
+        MAX_SQRT_RATIO - 1,
     )
-    end_time = time.time()
-    print(f"Amount out: {amount_out}")
-    print(f"Execution time: {(end_time - start_time)*10**6} milliseconds")
-    print("Swap quote calculation completed.")
+    print(f"Amount0: {amount0/10**decimals0}, Amount1: {amount1/10**decimals1}")
+    print(f"SqrtPriceX96: {sqrtPriceX96}, Liquidity: {liquidity}, Tick: {tick}")
+    print(f"Execution time: {time.time() - start_time} seconds")
